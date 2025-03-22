@@ -16,6 +16,7 @@ from telegram.ext import (
     filters
 )
 from dotenv import load_dotenv
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Setup
 load_dotenv()
@@ -32,6 +33,9 @@ CONFIG = {
     'voucher': os.getenv("VOUCHER_CODE"),
     'order_time': os.getenv("ORDER_TIME")
 }
+
+# Scheduler
+scheduler = AsyncIOScheduler()
 
 class BlibliAuto:
     def __init__(self, account_file):
@@ -101,11 +105,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("""
 🔧 **BLIBLI AUTO-ORDER BOT**
 /add - Tambah akun (kirim file .json)
+/delete <nama_file> - Hapus akun
 /set_time <YYYY-MM-DD HH:MM:SS> - Atur waktu
 /set_voucher <KODE> - Set voucher
 /set_link <URL> - Set produk
 /list - Lihat akun
 /run - Jalankan sekarang
+/schedule <nama_file> <YYYY-MM-DD HH:MM:SS> - Jadwalkan pemesanan
 """)
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -121,6 +127,24 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     json.dump(config, open('config.json', 'w'))
     
     await update.message.reply_text(f"✅ {filename} ditambahkan!")
+
+async def delete_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ALLOWED_USERS:
+        return
+    
+    if not context.args:
+        await update.message.reply_text("❌ Harap masukkan nama file akun yang ingin dihapus.")
+        return
+    
+    filename = context.args[0]
+    config = json.load(open('config.json'))
+    
+    if filename in config['accounts']:
+        config['accounts'].remove(filename)
+        json.dump(config, open('config.json', 'w'))
+        await update.message.reply_text(f"✅ {filename} berhasil dihapus!")
+    else:
+        await update.message.reply_text(f"❌ {filename} tidak ditemukan.")
 
 async def set_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     CONFIG['order_time'] = ' '.join(context.args)
@@ -141,14 +165,57 @@ async def list_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     accounts = "\n".join(json.load(open('config.json'))['accounts']) or "Tidak ada akun"
     await update.message.reply_text(f"📁 Daftar Akun:\n{accounts}")
 
+async def run_account_order(filename: str, chat_id: int):
+    blibli = BlibliAuto(filename)
+    await blibli.process_order(chat_id)
+
 async def run_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not all(CONFIG.values()):
         await update.message.reply_text("❌ Konfigurasi belum lengkap!")
         return
     
-    for account in json.load(open('config.json'))['accounts']:
-        blibli = BlibliAuto(account)
-        await blibli.process_order(update.effective_chat.id)
+    accounts = json.load(open('config.json'))['accounts']
+    if not accounts:
+        await update.message.reply_text("❌ Tidak ada akun yang terdaftar.")
+        return
+    
+    await update.message.reply_text("🚀 Memulai pemesanan untuk semua akun...")
+    
+    tasks = []
+    for account in accounts:
+        tasks.append(run_account_order(account, update.effective_chat.id))
+    
+    await asyncio.gather(*tasks)
+
+async def schedule_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ALLOWED_USERS:
+        return
+    
+    if len(context.args) < 2:
+        await update.message.reply_text("❌ Format: /schedule <nama_file_akun> <YYYY-MM-DD HH:MM:SS>")
+        return
+    
+    filename = context.args[0]
+    order_time = ' '.join(context.args[1:])
+    
+    try:
+        order_time = datetime.strptime(order_time, "%Y-%m-%d %H:%M:%S")
+        scheduler.add_job(
+            run_account_order,
+            'date',
+            run_date=order_time,
+            args=[filename, update.effective_chat.id]
+        )
+        await update.message.reply_text(f"⏰ Pemesanan untuk {filename} dijadwalkan pada {order_time}.")
+    except ValueError:
+        await update.message.reply_text("❌ Format waktu tidak valid. Gunakan format: YYYY-MM-DD HH:MM:SS")
+
+async def on_startup(app: Application):
+    for user_id in ALLOWED_USERS:
+        await Bot(token=TELEGRAM_TOKEN).send_message(
+            chat_id=user_id,
+            text="🤖 Bot telah terhubung dan siap digunakan!"
+        )
 
 if __name__ == "__main__":
     # Setup folder
@@ -159,9 +226,16 @@ if __name__ == "__main__":
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("add", handle_document))
+    app.add_handler(CommandHandler("delete", delete_account))
     app.add_handler(CommandHandler("set_time", set_time))
     app.add_handler(CommandHandler("set_voucher", set_voucher))
     app.add_handler(CommandHandler("set_link", set_link))
     app.add_handler(CommandHandler("list", list_accounts))
     app.add_handler(CommandHandler("run", run_now))
-    app.run_polling()
+    app.add_handler(CommandHandler("schedule", schedule_order))
+    
+    # Start scheduler
+    scheduler.start()
+    
+    # Notifikasi saat bot terhubung
+    app.run_polling(on_startup=on_startup)
