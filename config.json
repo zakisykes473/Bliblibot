@@ -1,1 +1,4 @@
-
+{
+    "accounts": ["akun1.json", "akun2.json"],
+    "payment_method": "Gopay"
+}
